@@ -24,7 +24,7 @@ from kitty.entry_points import main as main_entry_point
 from kitty.fast_data_types import (
     CLD_EXITED, CLD_KILLED, establish_controlling_tty, get_options,
     install_signal_handlers, read_signals, remove_signal_handlers, safe_pipe,
-    set_options
+    set_options, getpeereid
 )
 from kitty.options.types import Options
 from kitty.shm import SharedMemory
@@ -361,6 +361,11 @@ class SocketClosed(Exception):
     pass
 
 
+def verify_socket_creds(conn: socket.socket) -> bool:
+    uid, gid = getpeereid(conn.fileno())
+    return uid == os.geteuid() and gid == os.getegid()
+
+
 class SocketChild:
 
     def __init__(self, conn: socket.socket, addr: bytes, poll: select.poll):
@@ -389,8 +394,7 @@ class SocketChild:
     def read(self) -> bool:
         import array
         fds = array.array("i")   # Array of ints
-        maxfds = 3
-        msg, ancdata, flags, addr = self.conn.recvmsg(io.DEFAULT_BUFFER_SIZE, socket.CMSG_LEN(maxfds * fds.itemsize))
+        msg, ancdata, flags, addr = self.conn.recvmsg(io.DEFAULT_BUFFER_SIZE, 1024)
         for cmsg_level, cmsg_type, cmsg_data in ancdata:
             if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
                 # Append data, ignoring any truncated integers at the end.
@@ -670,6 +674,10 @@ def main(stdin_fd: int, stdout_fd: int, notify_child_death_fd: int, unix_socket:
     def handle_socket_client(event: int) -> None:
         check_event(event, 'UNIX socket fd listener failed')
         conn, addr = unix_socket.accept()
+        if not verify_socket_creds(conn):
+            print_error('Connection attempted with invalid credentials ignoring')
+            conn.close()
+            return
         sc = SocketChild(conn, addr, poll)
         socket_children[sc.conn.fileno()] = sc
 
